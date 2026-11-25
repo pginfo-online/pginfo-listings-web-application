@@ -1,0 +1,83 @@
+# Verification and production readiness
+
+Verified on November 24, 2026, using Node.js 22.23.3, Next.js 16.4.6 and Chromium on macOS. The public backend was exercised with read-only requests. Authenticated mutations ran against the isolated contract fixture.
+
+## Checks
+
+| Check                                                                        | Result                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Starter `npm run lint`, `tsc --noEmit`, `npm run build`                      | Passed before implementation. The starter had no test scripts.                                                                                                                                                                                                                                                  |
+| `npm ci` in a fresh temporary directory from the final manifest and lockfile | Passed. npm reported the inherited ESLint 9 deprecation. The installed Next.js ESLint config's import plugin declares support through ESLint 9.                                                                                                                                                                 |
+| `npm run format`, `npm run lint`, `npm run typecheck`                        | Passed.                                                                                                                                                                                                                                                                                                         |
+| `npm test`                                                                   | 8 tests passed. Covers query serialization, safe return paths, public projections, the route allowlist, error mapping, date handling, exact paise and image and checkout URL validation.                                                                                                                        |
+| `npm run build`                                                              | Passed with a production Next.js build. Public data routes render on demand. The build also works without live backend configuration.                                                                                                                                                                           |
+| `npm run test:e2e`                                                           | 16 tests passed against the fixture. Coverage includes city selection, autocomplete, URL filters and pagination, property gallery, saved states, OTP registration and session restoration, visits, booking status, ambiguous outcomes, saved search, meetups, and redirect to an intercepted Razorpay checkout. |
+| Responsive layout                                                            | Playwright checked home, explore, property, saved, meetups, account and sign-in at 375, 390, 414, 768, 1024, 1280, 1440 and 1920 px. The suite passed the heading and horizontal-overflow assertions at every width. Live desktop and phone layouts were also visually inspected.                               |
+| Automated accessibility                                                      | Axe found zero WCAG 2.0/2.1 A/AA rule violations on the home, explore, detail and sign-in test pages at 1440 px light and 390 px dark. Playwright verified modal opening, Escape dismissal and focus restoration, plus the mobile tab order.                                                                    |
+| `npm audit --audit-level=moderate`                                           | Passed with zero reported vulnerabilities.                                                                                                                                                                                                                                                                      |
+| `git diff --check`                                                           | Passed.                                                                                                                                                                                                                                                                                                         |
+| Read-only browser and live API smoke                                         | See the measurements and deployment findings below.                                                                                                                                                                                                                                                             |
+
+Early browser tests surfaced focus restoration after choosing a city and two visible-label mismatches. Those issues were corrected before the passing run. Playwright's generated output directories were added to the lint ignore list after a simultaneous run removed one while ESLint was scanning it. Live browser smoke also found an origin mismatch when running the production server on a loopback IP without `SITE_URL`. The loopback fallback was corrected and the smoke test passed.
+
+## Live backend findings
+
+The inspected route registrations, controllers, services, validators and mobile calls were used to define the frontend contract. The hosted API and source checkout expose different capabilities.
+
+| Feature                            | Live evidence and frontend behavior                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Discovery                          | The public catalog returned successful city, locality, suggestion, nearby and property search responses. The Bengaluru city-name filter scoped results. On the tested deployment, `cityId` returned the unscoped count, so the picker submits the verified city name. Photos were checked from the backend's S3 and Cloudinary sources.                                  |
+| Public property fields             | The live responses included contact and address fields that the guest UI should exclude. The web API and public cache use the validated projection, and the authenticated contact handler requires a backend-confirmed non-preview record.                                                                                                                               |
+| Visits and identity                | Anonymous reads of `/auth/me` and `/visit/my` returned 401. Live SMS/email delivery, authenticated visits and cancellation still require staging credentials for verification.                                                                                                                                                                                           |
+| Rental requests and saved searches | Anonymous discovery probes returned 404 for `/rental-bookings/mine` and `/saved-searches`, while the source registers both routers behind authentication. The browser omits those actions until the configured upstream confirms the routes. Booking and saved-search mutations passed fixture tests. Live Razorpay checkout, webhooks and settlement remain unverified. |
+| Meetups                            | The event API returned listings, and the upcoming query returned an empty result at verification time. The UI offers All events. Participation was exercised in the fixture.                                                                                                                                                                                             |
+| Service host                       | The `pginfo.business` API responded successfully. The alternate `api.pginfo.business` health probe returned 502 during verification. Select the approved upstream in configuration.                                                                                                                                                                                      |
+
+## Performance
+
+The production build uses server rendering, bounded backend pages, cancellable autocomplete reads, cached public projections, deferred image loading, and responsive image sizes. Screenshot reference images are excluded from the served public directory.
+
+The local live smoke run measures initial navigation in fresh Chromium contexts against a local production Next.js server connected to the hosted API. It is an unthrottled sample with potentially warm server and image caches. It cannot establish field Core Web Vitals, concurrent capacity or service-level targets.
+
+| Route            | Viewport |  TTFB |      LCP |   CLS | JavaScript transferred |
+| ---------------- | -------: | ----: | -------: | ----: | ---------------------: |
+| Home             |  1440 px | 67 ms |   404 ms | 0.100 |                244 KiB |
+| Bengaluru search |  1440 px | 13 ms | 1,360 ms | 0.000 |                249 KiB |
+| Home             |   390 px |  7 ms |   340 ms | 0.000 |                244 KiB |
+| Bengaluru search |   390 px |  6 ms |   820 ms | 0.000 |                249 KiB |
+
+Each navigation loaded 16 JavaScript chunks. Initial local regression budgets are 2.5 seconds LCP, 0.10 CLS and 300 KiB transferred JavaScript for these routes. Establish separate field and throttled-device budgets in the deployment environment.
+
+## Release considerations
+
+- **Security and privacy.** Writes require an exact configured origin, with a loopback fallback for development. Session cookies are HttpOnly and SameSite Lax and use Secure for an HTTPS origin. Private responses use `no-store` and cache keys include account identity. Client access state is cleared on sign-out, and a failed authorization refetch hides affected private data. The CSP blocks framing and restricts resource origins. It permits framework inline scripts, so it remains weaker than a nonce-based policy. Review backend public projections, app-review OTP configuration and rate limiting before rollout.
+- **Accessibility and language.** Navigation and core discovery, account and request flows offer English and Hindi. Backend text, listing content and some validation and recovery messages remain in their original language. The preference is browser-local. Screen-reader, Safari and Firefox testing remain open.
+- **SEO.** Public pages provide server-rendered content and metadata. Settings include a canonical origin, basic sitemap and robots controls. Filter permutations and account routes are excluded from indexing. An inventory-wide sitemap, crawl coverage and field search indexing were outside the verified work.
+- **Observability.** Structured diagnostics cover configuration and upstream contract failures and propagate safe request IDs where supplied. The current integration uses application logs. Centralized telemetry, alerting, real-device performance and error budgets require deployment configuration.
+- **Scale.** No production load test, CDN or shared multi-instance cache validation was run. Before high-volume traffic, verify cache sharing, image optimization capacity, upstream quota and per-client rate-limit behavior, Redis-backed refresh and notification reliability, MongoDB query latency, and backpressure during outages.
+- **Scope.** The web app serves discovery and renter workflows plus incoming rental decisions. Owner visit scheduling administration, meetup hosting, mobile push, platform administration and payment settlement stay in the existing backend or administrative/mobile surfaces. Web property favourites use a device-local shortlist, matching the mobile app's local preference model. Cross-device search saving requires the saved-search API, and alerts additionally require the backend scheduler.
+- **Deployment.** No web deployment was performed. See the README for runtime configuration and the supervised Node.js deployment command.
+
+## Landing page redesign verification · November 25, 2026
+
+The redesign was evaluated on the same Node.js and Chromium setup. The landing page uses the supplied PGinfo icon at `public/icon.png`. The reference images informed the hero structure, editorial rows, sticky search and city controls, side drawers and immersive gallery. The design uses PGinfo branding and original imagery.
+
+- Production build, type check, lint, formatting, dependency audit and diff checks passed. Vitest passed 11 cases. Playwright passed 19 cases, including responsive checks at all eight widths, automated accessibility checks, focus restoration, gallery keyboard input, authentication, verified photo forwarding and listing review submission.
+- The listing upload rejects anonymous access, spoofed image headers, disallowed MIME types and payloads above the supported limit. Listing content and uploaded photo URLs are validated before being forwarded to the backend. The page retains known successful uploads for retry and blocks immediate resubmission after an uncertain result and directs the owner to My listings.
+- The hosted city, locality, property, suggestion and meetup reads succeeded. The hosted `/auth/me` and `/properties/my` routes returned 401 to anonymous callers as expected. Real OTP delivery, hosted uploads and hosted listing creation were left for an authenticated staging run.
+- Motion is loaded with the gallery viewer. The landing page, drawers and city dropdown use CSS transitions. The gallery also supports reduced motion. The initial accessibility pass caught text contrast during the entrance fade. Removing the text fade preserved contrast during the transition.
+
+| Route            | Viewport |  TTFB |      LCP |   CLS | JavaScript transferred |
+| ---------------- | -------: | ----: | -------: | ----: | ---------------------: |
+| Home             |  1440 px | 66 ms |   140 ms | 0.000 |                250 KiB |
+| Bengaluru search |  1440 px | 13 ms | 1,040 ms | 0.000 |                258 KiB |
+| Home             |   390 px |  6 ms |   340 ms | 0.000 |                258 KiB |
+| Bengaluru search |   390 px |  5 ms |   800 ms | 0.001 |                266 KiB |
+
+These figures are from `PGINFO_WEB_URL=http://127.0.0.1:3111 npm run test:live` against a local production build and the hosted API. Server and image caches may be warm.
+
+### Hero artwork
+
+`public/media/landing-shared-living.webp` was generated with the built-in ImageGen tool and resized to 1280 pixels wide for the web. Generation prompt:
+
+> Use case: photorealistic-natural. Create an original commercial editorial photograph for a modern Indian rental discovery website, horizontal 4:3, no text or graphics. A warm, candid moment between two young adult Indian friends in their mid 20s discovering a new rented apartment: one woman in a textured ivory shirt and denim sits sideways on a deep teal sofa, laughing while her female friend wearing a loose rust-orange shirt stands leaning over the back of the sofa holding two ceramic mugs. Both naturally relaxed, looking at each other. Stylish but approachable Indian city apartment, peach cream wall, bright sun streaming from a broad window on the right, a leafy houseplant on the left and subtle pale turquoise cushions, sun just after morning, strong but soft natural lighting, clean architectural lines, film-quality natural skin, polished interiors campaign photography. Medium-wide shot, preserve margin around heads, plants and furniture, editorial human warmth, no logos, no lettering, no signage, no watermark, original scene.
